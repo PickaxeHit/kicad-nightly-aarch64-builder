@@ -1,0 +1,158 @@
+name: kicad-nightly-aarch64
+
+# 纯 workflow 方案：仓库里只需要这一个文件。
+# - PKGBUILD / wrapper / patch 每次从 AUR git 实时拉取（上游 bump 即跟新）
+# - ubuntu-24.04-arm（免费原生 arm64，需 public 仓库）里跑 Arch Linux ARM 容器
+# - 原版 PKGBUILD + makepkg --ignorearch，零改动
+# - ccache 跨跑缓存；同 pkgver 已有 artifact 时自动跳过（AUR 没更新就不白烧）
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: '覆盖 AUR PKGBUILD 的 commit pin（留空 = 跟随上游）'
+        required: false
+        default: ''
+  schedule:
+    - cron: '30 20 * * *'   # UTC 20:30 = 北京时间 04:30
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kicad-nightly-aarch64
+  cancel-in-progress: false
+
+env:
+  AUR_URL: https://aur.archlinux.org/kicad-nightly.git
+  ALARM_TARBALL: http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
+  MIRROR: http://mirror.archlinuxarm.org
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 360
+    steps:
+      - name: Pull PKGBUILD from AUR
+        run: |
+          git clone --depth 1 "$AUR_URL" aur
+          grep -E '^(pkgver|pkgrel|_commit|#commit)' aur/PKGBUILD || true
+
+      - name: Skip if this pkgver was already built
+        id: prep
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PKGVER=$(grep -m1 '^pkgver=' aur/PKGBUILD | cut -d= -f2 | tr -d '"')
+          PKGREL=$(grep -m1 '^pkgrel=' aur/PKGBUILD | cut -d= -f2 | tr -d '"')
+          ART="kicad-nightly-${PKGVER}-${PKGREL}-aarch64"
+          echo "artifact=$ART" >> "$GITHUB_OUTPUT"
+          # 已有同名 artifact（未过期）则跳过；过期后同版本会重编一次，无妨
+          if gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${ART}" --paginate \
+               -q '.artifacts | length > 0' | grep -q true; then
+            echo "==> $ART 已存在，AUR 无更新，跳过"
+            echo "need=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "need=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restore ALARM rootfs tarball
+        if: steps.prep.outputs.need == 'true'
+        uses: actions/cache@v4
+        with:
+          path: .cache/ArchLinuxARM-aarch64-latest.tar.gz
+          key: alarm-rootfs-v1
+
+      - name: Import ALARM rootfs image
+        if: steps.prep.outputs.need == 'true'
+        run: |
+          mkdir -p .cache
+          if [ ! -s .cache/ArchLinuxARM-aarch64-latest.tar.gz ]; then
+            curl -fL --retry 3 -C - -o .cache/ArchLinuxARM-aarch64-latest.tar.gz "$ALARM_TARBALL"
+          fi
+          docker image inspect alarm-aarch64:rootfs >/dev/null 2>&1 || \
+            docker import --platform linux/arm64 \
+              .cache/ArchLinuxARM-aarch64-latest.tar.gz alarm-aarch64:rootfs
+
+      - name: Restore ccache
+        if: steps.prep.outputs.need == 'true'
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-arm64-${{ github.run_id }}
+          restore-keys: |
+            ccache-arm64-
+
+      - name: Build (native arm64, ALARM container, original PKGBUILD + --ignorearch)
+        if: steps.prep.outputs.need == 'true'
+        env:
+          COMMIT: ${{ inputs.commit }}
+        run: |
+          mkdir -p .ccache
+          docker run --rm \
+            -e MIRROR="$MIRROR" \
+            -e COMMIT="$COMMIT" \
+            -e CCACHE_DIR=/ccache -e CCACHE_MAXSIZE=3G \
+            -v "$GITHUB_WORKSPACE":/build \
+            -v "$GITHUB_WORKSPACE/.ccache":/ccache \
+            -w /build \
+            alarm-aarch64:rootfs \
+            bash -s <<'EOF'
+          set -euo pipefail
+          echo "==> $(uname -m) / $(nproc) cores"
+          [ "$(uname -m)" = "aarch64" ] || { echo "ERROR: 需要 arm64 runner" >&2; exit 1; }
+
+          echo "==> pacman: mirror + keyring populate"
+          echo "Server = ${MIRROR}/\$arch/\$repo" > /etc/pacman.d/mirrorlist
+          pacman-key --init
+          pacman-key --populate archlinuxarm archlinux
+          pacman -Syu --noconfirm --needed
+          pacman -S --noconfirm --needed \
+            base-devel git cmake ninja boost mesa ccache lld fakeroot \
+            wxwidgets-gtk3 python glew curl glm ngspice opencascade unixodbc \
+            libgit2 protobuf nng poppler poppler-glib libspnav
+
+          # ccache 无侵入接入（不改 PKGBUILD）：PATH 前置编译器包装器
+          mkdir -p /usr/local/ccache-bin
+          for c in cc gcc c++ g++; do
+            printf '#!/bin/sh\nexec ccache /usr/bin/%s "$@"\n' "$c" > "/usr/local/ccache-bin/$c"
+            chmod +x "/usr/local/ccache-bin/$c"
+          done
+          export PATH="/usr/local/ccache-bin:$PATH"
+
+          # 属主对齐：AUR checkout 与容器内 builder 同为 uid 1001
+          chown 1001:1001 /build /ccache
+          chown -R 1001:1001 /build/aur
+          id builder >/dev/null 2>&1 || useradd -m -u 1001 -s /bin/bash builder
+
+          if [ -n "${COMMIT:-}" ]; then
+            echo "==> 覆盖 commit pin -> $COMMIT"
+            sed -i "s/#commit=.*/#commit=${COMMIT}/" /build/aur/PKGBUILD
+          fi
+
+          echo "==> makepkg --ignorearch（原生 arm64，-j$(nproc)；首跑约 2.5~4h，缓存热约 30~90min）"
+          time su builder -s /bin/bash -c \
+            'cd /build/aur && \
+             export PATH="/usr/local/ccache-bin:$PATH" && \
+             export MAKEFLAGS=-j$(nproc) CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) && \
+             makepkg -f --noconfirm --ignorearch'
+
+          echo "==> ccache 统计"
+          ccache -s || true
+
+          echo "==> 冒烟：kicad-cli version"
+          su builder -s /bin/bash -c \
+            'cd /build/aur/src/kicad-nightly && ./build/kicad/kicad-cli version' \
+            || echo "WARN: 冒烟未通过（仅警告，包仍会上传）"
+
+          echo "==> 产物: $(ls -1 /build/aur/kicad-nightly-*-aarch64.pkg.tar.zst)"
+          EOF
+
+      - name: Upload package artifact
+        if: steps.prep.outputs.need == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.prep.outputs.artifact }}
+          path: aur/kicad-nightly-*-aarch64.pkg.tar.zst
+          if-no-files-found: error
+          retention-days: 14
