@@ -89,15 +89,7 @@ jobs:
           COMMIT: ${{ inputs.commit }}
         run: |
           mkdir -p .ccache
-          docker run --rm \
-            -e MIRROR="$MIRROR" \
-            -e COMMIT="$COMMIT" \
-            -e CCACHE_DIR=/ccache -e CCACHE_MAXSIZE=3G \
-            -v "$GITHUB_WORKSPACE":/build \
-            -v "$GITHUB_WORKSPACE/.ccache":/ccache \
-            -w /build \
-            alarm-aarch64:rootfs \
-            bash -s <<'EOF'
+          cat > .ci-container-step.sh <<'EOF'
           set -euo pipefail
           echo "==> $(uname -m) / $(nproc) cores"
           [ "$(uname -m)" = "aarch64" ] || { echo "ERROR: 需要 arm64 runner" >&2; exit 1; }
@@ -147,6 +139,15 @@ jobs:
 
           echo "==> 产物: $(ls -1 /build/aur/kicad-nightly-*-aarch64.pkg.tar.zst)"
           EOF
+          docker run --rm \
+            -e MIRROR="$MIRROR" \
+            -e COMMIT="$COMMIT" \
+            -e CCACHE_DIR=/ccache -e CCACHE_MAXSIZE=3G \
+            -v "$GITHUB_WORKSPACE":/build \
+            -v "$GITHUB_WORKSPACE/.ccache":/ccache \
+            -w /build \
+            alarm-aarch64:rootfs \
+            bash /build/.ci-container-step.sh
 
       - name: Upload package artifact
         if: steps.prep.outputs.need == 'true'
