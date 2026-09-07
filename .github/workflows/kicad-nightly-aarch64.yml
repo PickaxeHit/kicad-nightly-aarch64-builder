@@ -128,6 +128,15 @@ jobs:
             sed -i "s/#commit=.*/#commit=${COMMIT}/" /build/aur/PKGBUILD
           fi
 
+          # PKGBUILD 运行时补丁（只影响本次构建，不回推 AUR）：
+          # 补声明 webkit2gtk-4.1（上游漏列的 wx webview 依赖），
+          # 使目标机 pacman -U 能自动补齐该运行库。幂等：上游已声明则跳过。
+          if ! grep -q 'webkit2gtk-4.1' /build/aur/PKGBUILD; then
+            sed -i "s/^\(depends=.*\))/\1 'webkit2gtk-4.1')/" /build/aur/PKGBUILD
+            grep -q 'webkit2gtk-4.1' /build/aur/PKGBUILD \
+              || echo "WARN: depends 注入未命中，上游 PKGBUILD 格式已变，请检查" >&2
+          fi
+
           echo "==> makepkg --ignorearch（原生 arm64，-j$(nproc)；首跑约 2.5~4h，缓存热约 30~90min）"
           time su builder -s /bin/bash -c \
             'cd /build/aur && \
