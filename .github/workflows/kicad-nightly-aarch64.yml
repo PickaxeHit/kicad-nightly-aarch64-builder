@@ -17,7 +17,7 @@ on:
     - cron: '30 20 * * *'   # UTC 20:30 = 北京时间 04:30
 
 permissions:
-  contents: read
+  contents: write  # 发布/更新 GitHub Release（作为 pacman 源）
 
 concurrency:
   group: kicad-nightly-aarch64
@@ -148,6 +148,13 @@ jobs:
              export MAKEFLAGS=-j$(nproc) CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) PKGEXT=.pkg.tar.zst && \
              makepkg -f --noconfirm --ignorearch'
 
+          echo "==> 生成 pacman 仓库数据库 (repo-add)"
+          cd /build/aur
+          rm -f kicad-nightly.db.tar.gz kicad-nightly.files.tar.gz kicad-nightly.db kicad-nightly.files
+          repo-add kicad-nightly.db.tar.gz kicad-nightly-*-aarch64.pkg.tar.zst
+          cp -f kicad-nightly.db.tar.gz kicad-nightly.db
+          cp -f kicad-nightly.files.tar.gz kicad-nightly.files
+
           echo "==> ccache 统计"
           ccache -s || true
 
@@ -176,3 +183,26 @@ jobs:
           path: aur/kicad-nightly-*-aarch64.pkg.tar.*
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish pacman repo (GitHub Release 'repo')
+        if: steps.prep.outputs.need == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=repo
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "kicad-nightly aarch64 pacman repo" \
+              --notes "Auto-updated pacman repository (built from AUR PKGBUILD in CI)."
+          fi
+          # 只保留当前 db 指向的最新包，防止 Release 资产无限膨胀
+          for a in $(gh release view "$TAG" --json assets -q '.assets[].name' \
+                      | grep '\.pkg\.tar\.' || true); do
+            gh release delete-asset "$TAG" "$a" -y
+          done
+          gh release upload "$TAG" --clobber \
+            aur/kicad-nightly.db aur/kicad-nightly.files \
+            aur/kicad-nightly-*-aarch64.pkg.tar.zst
+          echo "目标机 pacman.conf 片段："
+          echo "[kicad-nightly]"
+          echo "Server = https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          echo "SigLevel = Never"
