@@ -107,7 +107,8 @@ jobs:
           pacman -S --noconfirm --needed \
             base-devel git cmake ninja boost mesa ccache lld fakeroot \
             wxwidgets-gtk3 python glew curl glm ngspice opencascade unixodbc \
-            libgit2 protobuf nng poppler poppler-glib libspnav
+            libgit2 protobuf nng poppler poppler-glib libspnav \
+            webkit2gtk-4.1
 
           # ccache 无侵入接入（不改 PKGBUILD）：PATH 前置编译器包装器
           mkdir -p /usr/local/ccache-bin
