@@ -96,6 +96,11 @@ jobs:
 
           echo "==> pacman: mirror + keyring populate"
           echo "Server = ${MIRROR}/\$arch/\$repo" > /etc/pacman.d/mirrorlist
+          # GH Actions 的 docker 默认 seccomp 白名单拒绝 landlock(EPERM)，
+          # pacman 6.1+ 沙箱在容器内不可用：DisableSandbox + 空 HookDir
+          mkdir -p /tmp/nohooks
+          grep -q '^DisableSandbox' /etc/pacman.conf || sed -i '/^\[options\]/a DisableSandbox' /etc/pacman.conf
+          grep -q '^HookDir' /etc/pacman.conf || sed -i '/^\[options\]/a HookDir = /tmp/nohooks' /etc/pacman.conf
           pacman-key --init
           pacman-key --populate archlinuxarm archlinux
           pacman -Syu --noconfirm --needed
