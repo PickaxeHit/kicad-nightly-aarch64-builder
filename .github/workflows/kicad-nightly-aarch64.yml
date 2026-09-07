@@ -137,11 +137,15 @@ jobs:
               || echo "WARN: depends 注入未命中，上游 PKGBUILD 格式已变，请检查" >&2
           fi
 
+          # arch 修正：上游只声明 x86_64。--ignorearch 只跳过检查，但包架构
+          # 会被部分 makepkg 版本标成 any；直接改成 aarch64 一劳永逸
+          sed -i "s/^arch=.*/arch=('aarch64')/" /build/aur/PKGBUILD
+
           echo "==> makepkg --ignorearch（原生 arm64，-j$(nproc)；首跑约 2.5~4h，缓存热约 30~90min）"
           time su builder -s /bin/bash -c \
             'cd /build/aur && \
              export PATH="/usr/local/ccache-bin:$PATH" && \
-             export MAKEFLAGS=-j$(nproc) CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) && \
+             export MAKEFLAGS=-j$(nproc) CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) PKGEXT=.pkg.tar.zst && \
              makepkg -f --noconfirm --ignorearch'
 
           echo "==> ccache 统计"
@@ -152,7 +156,7 @@ jobs:
             'cd /build/aur/src/kicad-nightly && ./build/kicad/kicad-cli version' \
             || echo "WARN: 冒烟未通过（仅警告，包仍会上传）"
 
-          echo "==> 产物: $(ls -1 /build/aur/kicad-nightly-*-aarch64.pkg.tar.zst)"
+          echo "==> 产物: $(ls -1 /build/aur/kicad-nightly-*-aarch64.pkg.tar.* 2>/dev/null)"
           EOF
           docker run --rm \
             -e MIRROR="$MIRROR" \
@@ -169,6 +173,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.prep.outputs.artifact }}
-          path: aur/kicad-nightly-*-aarch64.pkg.tar.zst
+          path: aur/kicad-nightly-*-aarch64.pkg.tar.*
           if-no-files-found: error
           retention-days: 14
