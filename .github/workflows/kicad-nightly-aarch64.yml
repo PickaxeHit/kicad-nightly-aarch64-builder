@@ -152,7 +152,8 @@ jobs:
           # canary 应显示 1 miss 且 /ccache 有写入，否则直接失败止损
           su builder -s /bin/bash -c \
             'export PATH="/usr/local/ccache-bin:$PATH" && \
-             export CCACHE_DIR=/ccache CCACHE_MAXSIZE=3G CCACHE_COMPILERCHECK=content && \
+             export CCACHE_DIR=/ccache CCACHE_MAXSIZE=3G CCACHE_COMPILERCHECK=content \
+                 CCACHE_SLOPPINESS=pch_defines,time_macros && \
              ccache -z >/dev/null && \
              echo "int main(){return 0;}" > /tmp/cc-canary.c && \
              cc -c /tmp/cc-canary.c -o /tmp/cc-canary.o && \
@@ -164,7 +165,8 @@ jobs:
           time su builder -s /bin/bash -c \
             'cd /build/aur && \
              export PATH="/usr/local/ccache-bin:$PATH" && \
-             export CCACHE_DIR=/ccache CCACHE_MAXSIZE=3G CCACHE_COMPILERCHECK=content && \
+             export CCACHE_DIR=/ccache CCACHE_MAXSIZE=3G CCACHE_COMPILERCHECK=content \
+                 CCACHE_SLOPPINESS=pch_defines,time_macros && \
              export MAKEFLAGS=-j$(nproc) CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) PKGEXT=.pkg.tar.zst && \
              makepkg -f --noconfirm --ignorearch'
 
@@ -197,6 +199,7 @@ jobs:
             -e MIRROR="$MIRROR" \
             -e COMMIT="$COMMIT" \
             -e CCACHE_DIR=/ccache -e CCACHE_MAXSIZE=3G \
+            -e CCACHE_SLOPPINESS=pch_defines,time_macros \
             -v "$GITHUB_WORKSPACE":/build \
             -v "$GITHUB_WORKSPACE/.ccache":/ccache \
             -w /build \
