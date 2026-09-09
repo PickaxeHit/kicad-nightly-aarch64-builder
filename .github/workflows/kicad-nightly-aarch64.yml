@@ -38,21 +38,23 @@ jobs:
           git clone --depth 1 "$AUR_URL" aur
           grep -E '^(pkgver|pkgrel|_commit|#commit)' aur/PKGBUILD || true
 
-      - name: Skip if this pkgver was already built
+      - name: Skip if this pkgver was already published
         id: prep
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}  # 工作区无 .git（无 checkout），gh 需要 GH_REPO 解析仓库
         run: |
           PKGVER=$(grep -m1 '^pkgver=' aur/PKGBUILD | cut -d= -f2 | tr -d '"')
           PKGREL=$(grep -m1 '^pkgrel=' aur/PKGBUILD | cut -d= -f2 | tr -d '"')
-          ART="kicad-nightly-${PKGVER}-${PKGREL}-aarch64"
-          echo "artifact=$ART" >> "$GITHUB_OUTPUT"
-          # 已有同名 artifact（未过期）则跳过；过期后同版本会重编一次，无妨
-          if gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${ART}" --paginate \
-               -q '.artifacts | length > 0' | grep -q true; then
-            echo "==> $ART 已存在，AUR 无更新，跳过"
+          PKG="kicad-nightly-${PKGVER}-${PKGREL}-aarch64.pkg.tar.zst"
+          echo "artifact=kicad-nightly-${PKGVER}-${PKGREL}-aarch64" >> "$GITHUB_OUTPUT"
+          # 以 Release 'repo' 是否已含该包为准（artifact 只是 14 天备份）。
+          # 若按 artifact 判断，"构建成功但发布失败"时会永远跳过、发布永远不执行
+          if gh release view repo --json assets -q '.assets[].name' 2>/dev/null | grep -qxF "$PKG"; then
+            echo "==> $PKG 已发布到 Release 'repo'，AUR 无更新，跳过"
             echo "need=false" >> "$GITHUB_OUTPUT"
           else
+            echo "==> $PKG 未发布，开始构建"
             echo "need=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -223,6 +225,7 @@ jobs:
         if: steps.prep.outputs.need == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}  # 工作区无 .git，gh 需要 GH_REPO（否则 fatal: not a git repository）
         run: |
           TAG=repo
           if ! gh release view "$TAG" >/dev/null 2>&1; then
