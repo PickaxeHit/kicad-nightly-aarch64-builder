@@ -76,10 +76,10 @@ jobs:
 
       - name: Restore ccache
         if: steps.prep.outputs.need == 'true'
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: .ccache
-          key: ccache-arm64-${{ github.run_id }}
+          key: ccache-arm64-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             ccache-arm64-
 
@@ -118,6 +118,11 @@ jobs:
           done
           export PATH="/usr/local/ccache-bin:$PATH"
 
+          # 双保险：打开 makepkg 官方 ccache 通道（pacman 7.1 的 buildenv/compiler.sh
+          # 会把 /usr/lib/ccache/bin 前置到 PATH）
+          sed -i 's/^BUILDENV=\(.*\)!ccache\(.*\)$/BUILDENV=\1ccache\2/' /etc/makepkg.conf
+          grep '^BUILDENV' /etc/makepkg.conf
+
           # 属主对齐：AUR checkout 与容器内 builder 同为 uid 1001
           chown 1001:1001 /build /ccache
           chown -R 1001:1001 /build/aur
@@ -141,22 +146,43 @@ jobs:
           # 会被部分 makepkg 版本标成 any；直接改成 aarch64 一劳永逸
           sed -i "s/^arch=.*/arch=('aarch64')/" /build/aur/PKGBUILD
 
+          # 链路自检（以 builder 身份跑）：验证 wrapper -> ccache -> /ccache 全链路可写；
+          # canary 应显示 1 miss 且 /ccache 有写入，否则直接失败止损
+          su builder -s /bin/bash -c \
+            'export PATH="/usr/local/ccache-bin:$PATH" && \
+             export CCACHE_DIR=/ccache CCACHE_MAXSIZE=3G CCACHE_COMPILERCHECK=content && \
+             ccache -z >/dev/null && \
+             echo "int main(){return 0;}" > /tmp/cc-canary.c && \
+             cc -c /tmp/cc-canary.c -o /tmp/cc-canary.o && \
+             echo "==> ccache 链路自检：" && ccache -s && du -sh /ccache && \
+             ccache -z >/dev/null'
+
           echo "==> makepkg --ignorearch（原生 arm64，-j$(nproc)；首跑约 2.5~4h，缓存热约 30~90min）"
+          # CCACHE_* 在 su 内部再显式 export 一遍，杜绝任何环境丢失的可能
           time su builder -s /bin/bash -c \
             'cd /build/aur && \
              export PATH="/usr/local/ccache-bin:$PATH" && \
+             export CCACHE_DIR=/ccache CCACHE_MAXSIZE=3G CCACHE_COMPILERCHECK=content && \
              export MAKEFLAGS=-j$(nproc) CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) PKGEXT=.pkg.tar.zst && \
              makepkg -f --noconfirm --ignorearch'
+
+          echo "==> ccache 统计（本次构建；放在 repo-add 前，失败也能看到命中率）"
+          ccache -s || true
+          du -sh /ccache 2>/dev/null || true
+          echo "==> CMake 实际使用的编译器（应指向 /usr/local/ccache-bin）"
+          grep -E '^CMAKE_C(XX)?_COMPILER' /build/aur/src/kicad-nightly/build/CMakeCache.txt 2>/dev/null \
+            || echo "WARN: 未找到 CMakeCache.txt，无法确认编译器路径"
 
           echo "==> 生成 pacman 仓库数据库 (repo-add)"
           cd /build/aur
           rm -f kicad-nightly.db.tar.gz kicad-nightly.files.tar.gz kicad-nightly.db kicad-nightly.files
           repo-add kicad-nightly.db.tar.gz kicad-nightly-*-aarch64.pkg.tar.zst
+          # pacman >= 7.1 的 repo-add 会自动创建 .db/.files -> .tar.gz 软链接，
+          # 直接 cp 会报 "are the same file"；先 rm 再实体拷贝，兼容任意 pacman 版本，
+          # 也保证 Release 上传的是普通文件而非软链接
+          rm -f kicad-nightly.db kicad-nightly.files
           cp -f kicad-nightly.db.tar.gz kicad-nightly.db
           cp -f kicad-nightly.files.tar.gz kicad-nightly.files
-
-          echo "==> ccache 统计"
-          ccache -s || true
 
           echo "==> 冒烟：kicad-cli version"
           su builder -s /bin/bash -c \
@@ -174,6 +200,15 @@ jobs:
             -w /build \
             alarm-aarch64:rootfs \
             bash /build/.ci-container-step.sh
+
+      - name: Save ccache (job 失败也保存)
+        # actions/cache 合并模式只在 job 成功时落盘（post-if: success()），
+        # repo-add/上传一挂，几十分钟的编译缓存就被整个扔掉 —— 拆开并 always() 保存
+        if: always() && steps.prep.outputs.need == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: ccache-arm64-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Upload package artifact
         if: steps.prep.outputs.need == 'true'
